@@ -1,0 +1,105 @@
+plugins {
+	id 'java'
+	id 'org.springframework.boot' version '3.2.3'
+	id 'io.spring.dependency-management' version '1.1.4'
+	id 'org.hibernate.orm' version '6.4.4.Final'
+	id 'org.graalvm.buildtools.native' version '0.9.28'
+	id 'jacoco'
+}
+
+group = 'com'
+version = '0.0.1-SNAPSHOT'
+
+java {
+	sourceCompatibility = '17'
+}
+
+configurations {
+	compileOnly {
+		extendsFrom annotationProcessor
+	}
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	implementation 'org.neo4j.driver:neo4j-java-driver:5.18.0'
+	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+	implementation 'org.springframework.boot:spring-boot-starter-data-neo4j'
+	implementation 'org.springframework.boot:spring-boot-starter-thymeleaf'
+	implementation 'org.springframework.boot:spring-boot-starter-web'
+	implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.0.2'
+	compileOnly 'org.projectlombok:lombok'
+	runtimeOnly 'org.postgresql:postgresql'
+	annotationProcessor 'org.projectlombok:lombok'
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+
+	// OpenAI
+	implementation 'com.theokanning.openai-gpt3-java:client:0.12.0'
+	implementation 'com.theokanning.openai-gpt3-java:service:0.12.0'
+
+	// Stripe
+	implementation 'com.stripe:stripe-java:22.10.0'
+
+	// JAXB API
+	implementation 'javax.xml.bind:jaxb-api:2.3.0'
+
+	// Platform.sh config reader
+	implementation 'sh.platform:config:2.2.2'
+
+	// AWS
+	implementation 'org.springframework.cloud:spring-cloud-starter-aws:2.2.6.RELEASE'
+
+	// WebFlux
+	implementation 'org.springframework.boot:spring-boot-starter-webflux'
+
+	// Spring Security OAuth2 Client
+	implementation 'org.springframework.boot:spring-boot-starter-oauth2-client'
+
+	// JWT Support
+	implementation 'io.jsonwebtoken:jjwt-api:0.11.5'
+	runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.11.5'
+	runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.11.5'
+
+	// Webp
+	implementation 'com.sksamuel.scrimage:scrimage-core:4.1.1'
+	implementation 'com.sksamuel.scrimage:scrimage-webp:4.1.1'
+
+	// thumbnailator
+	implementation 'net.coobird:thumbnailator:0.4.14'
+
+	// Validation - @NotBlank
+	implementation 'org.springframework.boot:spring-boot-starter-validation'
+
+	// prometheus
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+	implementation 'io.micrometer:micrometer-registry-prometheus'
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
+}
+
+hibernate {
+	enhancement {
+		enableAssociationManagement = true
+	}
+}
+
+jacoco {
+	toolVersion = "0.8.7"
+}
+
+test {
+	finalizedBy jacocoTestReport
+}
+
+jacocoTestReport {
+	reports {
+		xml.required = true
+		html.required = true
+	}
+}
+

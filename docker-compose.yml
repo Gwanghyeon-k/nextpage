@@ -1,0 +1,147 @@
+version: '3'
+
+services:
+  neo4j:
+    container_name: neo4j
+    image: neo4j:latest
+    restart: always
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH}
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - ./nextpage-db/neo4j/data:/data
+      - ./nextpage-db/neo4j/logs:/logs
+    networks:
+      - npage
+
+  postgresql:
+    container_name: postgresql
+    image: postgres:12.0-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./nextpage-db/postgres-data:/var/lib/postgresql/data
+    ports:
+      - 5432:5432
+    networks:
+      - npage
+
+  pgadmin:
+    # 사용할 이미지
+    image: dpage/pgadmin4
+    # 컨테이너 실행 시 재시작
+    restart: always
+    # 컨테이너명 설정
+    container_name: pgadmin4
+    user: root
+    # 접근 포트 설정 (컨테이너 외부:컨테이너 내부)
+    ports:
+      - "5050:80"
+    # 환경 변수 설정
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+    # 볼륨 설정
+    volumes:
+      - ./nextpage-db/pgadmin/:/var/lib/pgadmin
+    networks:
+      - npage
+
+  # 스프링 로컬로 실행 시 주석 처리하고 DB만 도커 빌드
+  springboot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    depends_on:
+      - neo4j
+      - postgresql
+    ports:
+      - 8080:8080
+    container_name: springboot
+    environment:
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL}
+      SPRING_DATASOURCE_USERNAME: ${SPRING_DATASOURCE_USERNAME}
+      SPRING_DATASOURCE_PASSWORD: ${SPRING_DATASOURCE_PASSWORD}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE}
+      NEO4J_URI: ${SPRING_NEO4J_URI}
+      NEO4J_PASSWORD: ${SPRING_NEO4J_PASSWORD}
+    networks:
+      - npage
+
+  # Monitoring
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    user: root
+    ports:
+      - "3001:3000"
+#    env_file:
+#      - './monitoring/grafana/env.grafana'
+    volumes:
+      - './monitoring/grafana:/var/lib/grafana'
+    restart: always
+    environment:
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_BASIC_ENABLED=false
+    depends_on:
+      - springboot
+    networks:
+      - npage
+
+  k6:
+    image: grafana/k6:latest
+    container_name: k6
+    ports:
+      - "6565:6565"
+    environment:
+      - K6_OUT=influxdb=http://influxdb:8086/k6
+    volumes:
+      - ./monitoring/k6:/scripts
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # 호스트와 연결(로컬테스트를 위함)
+    command: ["run", "/scripts/test_script.js"]
+    networks:
+      - npage
+
+  influxdb:
+    image: influxdb:1.8
+    ports:
+      - "8086:8086"
+    environment:
+      - INFLUXDB_DB=k6
+    restart: on-failure # 실패 시 재시작
+    networks:
+      - npage
+
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    volumes:
+      - ./monitoring/prometheus/config:/etc/prometheus
+      - ./monitoring/prometheus/volume:/prometheus
+    ports:
+      - 9090:9090
+    command:
+      - '--web.enable-lifecycle' # api 재시작없이 설정 파일 reload
+      - '--storage.tsdb.path=/prometheus'
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    user: root
+    restart: always
+    networks:
+      - npage
+
+networks:
+  npage:
+    driver: bridge
+
+

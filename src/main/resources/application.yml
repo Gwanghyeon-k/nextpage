@@ -1,0 +1,81 @@
+spring:
+  profiles:
+    include: oauth, jwt
+
+  datasource:
+    url: ${POSTGRES_URL}
+    username: ${POSTGRES_USERNAME}
+    password: ${POSTGRES_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: update # 엔티티 기반 자동 테이블 생성
+      naming:
+        physical-strategy: org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl # 카멜케이스 허용하기
+    properties:
+      hibernate:
+        format_sql: true
+    #    show-sql: true
+
+  neo4j:
+    uri: ${NEO4J_URI}
+    authentication:
+      username: ${NEO4J_USERNAME}
+      password: ${NEO4J_PASSWORD}
+
+cloud:
+  aws:
+    region:
+      static: ap-northeast-2
+    s3:
+      bucket: ${AWS_BUCKET}
+    stack:
+      auto: false
+    credentials:
+      secret-key: ${AWS_SECRET_KEY}
+      access-key: ${AWS_ACCESS_KEY}
+
+openai:
+  api:
+    key: ${GPT_API_KEY}
+
+logging:
+  level:
+    org:
+      springframework:
+        security: DEBUG
+        data:
+          neo4j: DEBUG
+      hibernate:
+        SQL: DEBUG
+
+
+springdoc:
+  swagger-ui:
+    path: /api/v2 # 접속 경로
+    groups-order: DESC # 내림차순
+    tags-sorter: alpha # 알파벳순 정렬
+    operations-sorter: method # 메소드 별 정렬
+    disable-swagger-default-url: true
+    display-request-duration: true
+  api-docs:
+    path: /v2/api-docs
+  show-actuator: true
+  default-consumes-media-type: application/json
+  default-produces-media-type: application/json
+  writer-with-default-pretty-printer: true # 예쁘게
+  paths-to-match:
+    - /api/v2/**
+
+# 모니터링
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, prometheus
+  prometheus:
+    metrics:
+      export:
+        enabled: true
