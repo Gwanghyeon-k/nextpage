@@ -1,30 +1,27 @@
 package com.nextpage.backend.service;
 
-import com.nextpage.backend.error.exception.image.ImageConversionException;
 import com.nextpage.backend.error.exception.image.ImageDownloadException;
-import com.nextpage.backend.error.exception.image.ImageResizeException;
 import com.nextpage.backend.error.exception.image.ImageUploadException;
-import com.sksamuel.scrimage.ImmutableImage;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.model.PutObjectRequest;
-import com.sksamuel.scrimage.webp.WebpWriter;
-import lombok.extern.slf4j.Slf4j;
-import net.coobird.thumbnailator.Thumbnails;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-import javax.imageio.ImageIO;
-import java.awt.image.BufferedImage;
+
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.file.Path;
+import java.util.UUID;
 
-@Service
 @Slf4j
+@Service
 public class ImageService {
     private final AmazonS3 amazonS3;
 
@@ -35,74 +32,86 @@ public class ImageService {
         this.amazonS3 = amazonS3;
     }
 
-    public String uploadImageToS3(String imageUrl) throws ImageDownloadException, ImageResizeException, ImageConversionException, ImageUploadException {
-        long startTime = System.currentTimeMillis();
+    /**
+     * 1) DALL·E에서 받은 URL로 이미지를 다운로드
+     * 2) 원본 이미지를 S3에 업로드 (람다 트리거)
+     * 3) 리사이징된 S3 버킷의 URL 반환
+     */
+    public String uploadImageToS3UsingLambda(String imageUrl) throws ImageDownloadException, ImageUploadException {
+        // 1) 이미지 다운로드
         File imageFile = downloadImage(imageUrl);
-        long download = System.currentTimeMillis();
-        File resizedImage = resizeImage(imageFile);
-        long afterresized = System.currentTimeMillis();
-        File webpImage = convertToWebP(resizedImage);
-        long endTime = System.currentTimeMillis();
-        System.out.println("Download Time: " + (download - startTime) + " ms");
-        System.out.println("Resize Time: " + (afterresized - download) + " ms");
-        System.out.println("Convert to WebP Time: " + (endTime - afterresized) + " ms");
 
+        // 2) 원본 업로드
+        String originalKey = "dalle/" + UUID.randomUUID() + getExtension(imageFile);
+        uploadFile(bucketName, originalKey, imageFile);
 
-        return uploadFileToS3(webpImage);
+        // 3) Lambda가 만든 리사이즈된 파일 키
+        String resizedKey = "resized-" + originalKey;
+        String resizedBucket = bucketName + "-resize";
+
+        // 4) 최종 URL 반환
+        return amazonS3.getUrl(resizedBucket, resizedKey).toString();
     }
 
     private File downloadImage(String imageUrl) throws ImageDownloadException {
-        log.info("Downloading image to file from URL: {}", imageUrl);
-        HttpClient client = HttpClient.newHttpClient();
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(imageUrl))
-                .build();
+        log.info("Downloading image from URL: {}", imageUrl);
         try {
-            File tempFile = File.createTempFile("image", ".tmp");
-            HttpResponse<Path> response = client.send(request, HttpResponse.BodyHandlers.ofFile(tempFile.toPath()));
-            int statusCode = response.statusCode();
-            if (statusCode >= 200 && statusCode < 300) {
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(imageUrl))
+                    .build();
+            HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+
+            int status = response.statusCode();
+            if (status >= 200 && status < 300) {
+                File tempFile = File.createTempFile("dalle-", getExtensionFromUrl(imageUrl));
+                try (InputStream is = response.body(); OutputStream os = new FileOutputStream(tempFile)) {
+                    is.transferTo(os);
+                }
                 return tempFile;
+            } else {
+                log.error("Image download failed, status: {}", status);
+                throw new ImageDownloadException("이미지 다운로드 실패: status ");
             }
-                throw new ImageDownloadException();
+        } catch (ImageDownloadException e) {
+            throw e;
         } catch (Exception e) {
-            throw new ImageDownloadException();
+            log.error("Exception during image download", e);
+            throw new ImageDownloadException("이미지 다운로드 실패");
         }
     }
 
-    private File resizeImage(File imageFile) throws ImageResizeException {
-        try {
-            BufferedImage resizedImage = Thumbnails.of(imageFile)
-                    .size(512, 512)
-                    .asBufferedImage();
-            File tempFile = new File(imageFile.getParent(), "resized_" + System.currentTimeMillis() + ".png");
-            ImageIO.write(resizedImage, "png", tempFile);
-            return tempFile;
-        } catch (Exception e) {
-            throw new ImageResizeException();
-        }
-    }
-
-    private File convertToWebP(File imageFile) throws ImageConversionException {
-        try {
-            ImmutableImage image = ImmutableImage.loader().fromFile(imageFile);
-            File outputFile = new File(imageFile.getParent(), System.currentTimeMillis() + ".webp");
-            image.output(WebpWriter.DEFAULT, outputFile);
-            return outputFile;
-        } catch (Exception e) {
-            throw new ImageConversionException();
-        }
-    }
-
-    private String uploadFileToS3(File file) throws ImageUploadException {
-        try {
+    private void uploadFile(String bucket, String key, File file) throws ImageUploadException {
+        try (FileInputStream fis = new FileInputStream(file)) {
             ObjectMetadata metadata = new ObjectMetadata();
             metadata.setContentLength(file.length());
-            PutObjectRequest putObjectRequest = new PutObjectRequest(bucketName, file.getName(), new FileInputStream(file), metadata);
-            amazonS3.putObject(putObjectRequest);
-            return amazonS3.getUrl(bucketName, file.getName()).toString();
+            metadata.setContentType(detectContentType(key));
+            amazonS3.putObject(new PutObjectRequest(bucket, key, fis, metadata));
         } catch (Exception e) {
-            throw new ImageUploadException();
+            log.error("Exception during S3 upload", e);
+            throw new ImageUploadException("이미지 업로드 실패");
         }
+    }
+
+    private String getExtension(File file) {
+        String name = file.getName();
+        return name.substring(name.lastIndexOf('.'));
+    }
+
+    private String getExtensionFromUrl(String url) {
+        int idx = url.lastIndexOf('.');
+        if (idx > 0) {
+            String ext = url.substring(idx);
+            int q = ext.indexOf('?');
+            return q > 0 ? ext.substring(0, q) : ext;
+        }
+        return ".png";
+    }
+
+    private String detectContentType(String key) {
+        if (key.endsWith(".png")) return "image/png";
+        if (key.endsWith(".jpg") || key.endsWith(".jpeg")) return "image/jpeg";
+        if (key.endsWith(".webp")) return "image/webp";
+        return "application/octet-stream";
     }
 }

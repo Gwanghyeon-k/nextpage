@@ -1,62 +1,99 @@
 package com.nextpage.backend.service;
 
+import com.nextpage.backend.error.exception.image.ImageDownloadException;
+import com.nextpage.backend.error.exception.image.ImageUploadException;
 import com.nextpage.backend.error.exception.openAI.OpenAiClientException;
 import com.nextpage.backend.error.exception.openAI.OpenAiResponseException;
 import com.nextpage.backend.error.exception.openAI.OpenAiServerException;
-import org.springframework.beans.factory.annotation.Autowired;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.ClientResponse;
 import reactor.core.publisher.Mono;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+@Slf4j
+@RequiredArgsConstructor
 @Service
 public class OpenAiService {
 
-    private final WebClient webClient;
-    private final String apiKey;
+    private final WebClient.Builder webClientBuilder;
+    private final ImageService imageService;
 
-    @Autowired
-    public OpenAiService(WebClient.Builder webClientBuilder, @Value("${openai.api.key}") String apiKey) {
-        this.webClient = webClientBuilder.baseUrl("https://api.openai.com/v1/").build();
-        this.apiKey = apiKey;
-    }
+    @Value("${openai.api.key}")
+    private String apiKey;
+
+    /**
+     * 1) DALL·E에서 이미지 생성
+     * 2) S3 업로드 + Lambda 리사이징
+     * 3) 리사이즈된 최종 URL 반환
+     */
     public String generateImage(String content) {
+        WebClient webClient = webClientBuilder.baseUrl("https://api.openai.com/v1").build();
         Map<String, Object> requestBody = prepareRequestBody(content);
-        return this.webClient.post()
+
+        Map<String, Object> responseMap = webClient.post()
                 .uri("/images/generations")
-                .header("Authorization", "Bearer " + this.apiKey)
+                .header("Authorization", "Bearer " + apiKey)
                 .bodyValue(requestBody)
-                .retrieve()
-                .onStatus(status -> status.is4xxClientError(), response -> Mono.error(new OpenAiClientException()))
-                .onStatus(status -> status.is5xxServerError(), response -> Mono.error(new OpenAiServerException()))
-                .bodyToMono(Map.class)
-                .map(this::extractImageUrl)
-                .block(); // This makes the call synchronous
+                .exchangeToMono(this::handleResponse)
+                .block();
+
+        String dalleUrl = extractImageUrl(responseMap);
+
+        try {
+            return imageService.uploadImageToS3UsingLambda(dalleUrl);
+        } catch (ImageDownloadException | ImageUploadException e) {
+            log.error("이미지 처리 오류: {}", e.getMessage(), e);
+            throw new RuntimeException("이미지 처리 중 오류가 발생했습니다.", e);
+        }
     }
 
+    private Mono<Map<String, Object>> handleResponse(ClientResponse resp) {
+        if (resp.statusCode().is4xxClientError()) {
+            return resp.bodyToMono(String.class)
+                    .flatMap(body -> {
+                        log.error("OpenAI 4xx error: {} - {}", resp.statusCode(), body);
+                        return Mono.error(new OpenAiClientException("OpenAI client error: " + body));
+                    });
+        } else if (resp.statusCode().is5xxServerError()) {
+            return resp.bodyToMono(String.class)
+                    .flatMap(body -> {
+                        log.error("OpenAI 5xx error: {} - {}", resp.statusCode(), body);
+                        return Mono.error(new OpenAiServerException());
+                    });
+        } else {
+            return resp.bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {});
+        }
+    }
 
     private Map<String, Object> prepareRequestBody(String content) {
-        String prompt = String.format("When generating an image, be sure to observe the following conditions: Do not add text to the image. I want an illustration image, not contain text in the image\nDesign: a detailed digital illustration drawn with bright colors and clean lines. Please make the following images according to the previous requirements: %s \n Avoid any content that may be considered inappropriate or offensive, ensuring the image aligns with content policies.", content);
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("prompt", prompt);
-        requestBody.put("n", 1);
-        requestBody.put("size", "1024x1024");
-        requestBody.put("model", "dall-e-3");
-        return requestBody;
+        String prompt = String.format(
+                "When generating an image, observe: no text in image; illustration only. %s", content
+        );
+        Map<String, Object> req = new HashMap<>();
+        req.put("prompt", prompt);
+        req.put("n", 1);
+        req.put("size", "1024x1024");
+        req.put("model", "dall-e-3");
+        return req;
     }
 
+    @SuppressWarnings("unchecked")
     private String extractImageUrl(Map<String, Object> response) {
         if (response.containsKey("data")) {
             List<Map<String, Object>> images = (List<Map<String, Object>>) response.get("data");
             return images.stream()
                     .findFirst()
-                    .map(image -> (String) image.get("url"))
-                    .orElse("Image generation failed");
+                    .map(img -> (String) img.get("url"))
+                    .orElseThrow(OpenAiResponseException::new);
         }
-            throw new OpenAiResponseException();
+        throw new OpenAiResponseException();
     }
 }
