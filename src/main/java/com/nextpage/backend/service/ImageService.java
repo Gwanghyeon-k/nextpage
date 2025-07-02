@@ -2,13 +2,18 @@ package com.nextpage.backend.service;
 
 import com.nextpage.backend.error.exception.image.ImageDownloadException;
 import com.nextpage.backend.error.exception.image.ImageUploadException;
+import com.sksamuel.scrimage.ImmutableImage;
+import com.sksamuel.scrimage.webp.WebpWriter;
 import lombok.extern.slf4j.Slf4j;
+import net.coobird.thumbnailator.Thumbnails;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.model.CannedAccessControlList;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.model.PutObjectRequest;
-
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -33,24 +38,43 @@ public class ImageService {
     }
 
     /**
-     * 1) DALL·E에서 받은 URL로 이미지를 다운로드
-     * 2) 원본 이미지를 S3에 업로드 (람다 트리거)
-     * 3) 리사이징된 S3 버킷의 URL 반환
+     * Lambda 리사이즈 흐름: download → upload original (Lambda triggers resize) → return resized URL
      */
-    public String uploadImageToS3UsingLambda(String imageUrl) throws ImageDownloadException, ImageUploadException {
-        // 1) 이미지 다운로드
+    public String uploadWithLambda(String imageUrl) throws ImageDownloadException, ImageUploadException {
         File imageFile = downloadImage(imageUrl);
-
-        // 2) 원본 업로드
         String originalKey = "dalle/" + UUID.randomUUID() + getExtension(imageFile);
         uploadFile(bucketName, originalKey, imageFile);
-
-        // 3) Lambda가 만든 리사이즈된 파일 키
-        String resizedKey = "resized-" + originalKey;
         String resizedBucket = bucketName + "-resize";
-
-        // 4) 최종 URL 반환
+        String resizedKey = "resized-" + originalKey;
         return amazonS3.getUrl(resizedBucket, resizedKey).toString();
+    }
+
+    /**
+     * Thumbnailator + WebP 흐름: download → resize with Thumbnailator → convert to WebP → upload → return URL
+     */
+    public String uploadWithThumbnailator(String imageUrl) throws ImageDownloadException, ImageUploadException {
+        File imageFile = downloadImage(imageUrl);
+        try {
+            // 리사이즈
+            BufferedImage thumb = Thumbnails.of(imageFile)
+                    .size(512, 512)
+                    .asBufferedImage();
+            File thumbPng = File.createTempFile("thumb-", ".png");
+            ImageIO.write(thumb, "png", thumbPng);
+
+            // WebP 변환
+            ImmutableImage img = ImmutableImage.loader().fromFile(thumbPng);
+            File webpFile = File.createTempFile("thumb-", ".webp");
+            img.output(WebpWriter.DEFAULT, webpFile);
+
+            // 업로드
+            String key = "dalle-thumb/" + UUID.randomUUID() + ".webp";
+            uploadFile(bucketName, key, webpFile);
+            return amazonS3.getUrl(bucketName, key).toString();
+        } catch (Exception e) {
+            log.error("Thumbnailator flow failed", e);
+            throw new ImageUploadException("Thumbnailator 흐름 실패", e);
+        }
     }
 
     private File downloadImage(String imageUrl) throws ImageDownloadException {
@@ -60,42 +84,40 @@ public class ImageService {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(imageUrl))
                     .build();
-            HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
-
-            int status = response.statusCode();
+            HttpResponse<InputStream> resp = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            int status = resp.statusCode();
             if (status >= 200 && status < 300) {
-                File tempFile = File.createTempFile("dalle-", getExtensionFromUrl(imageUrl));
-                try (InputStream is = response.body(); OutputStream os = new FileOutputStream(tempFile)) {
+                File tmp = File.createTempFile("dalle-", getExtensionFromUrl(imageUrl));
+                try (InputStream is = resp.body(); OutputStream os = new FileOutputStream(tmp)) {
                     is.transferTo(os);
                 }
-                return tempFile;
-            } else {
-                log.error("Image download failed, status: {}", status);
-                throw new ImageDownloadException("이미지 다운로드 실패: status ");
+                return tmp;
             }
+            throw new ImageDownloadException("다운로드 실패 status=" + status);
         } catch (ImageDownloadException e) {
             throw e;
         } catch (Exception e) {
-            log.error("Exception during image download", e);
+            log.error("Download exception", e);
             throw new ImageDownloadException("이미지 다운로드 실패");
         }
     }
 
     private void uploadFile(String bucket, String key, File file) throws ImageUploadException {
         try (FileInputStream fis = new FileInputStream(file)) {
-            ObjectMetadata metadata = new ObjectMetadata();
-            metadata.setContentLength(file.length());
-            metadata.setContentType(detectContentType(key));
-            amazonS3.putObject(new PutObjectRequest(bucket, key, fis, metadata));
+            ObjectMetadata meta = new ObjectMetadata();
+            meta.setContentLength(file.length());
+            meta.setContentType(detectContentType(key));
+            PutObjectRequest req = new PutObjectRequest(bucket, key, fis, meta)
+                    .withCannedAcl(CannedAccessControlList.PublicRead);
+            amazonS3.putObject(req);
         } catch (Exception e) {
-            log.error("Exception during S3 upload", e);
-            throw new ImageUploadException("이미지 업로드 실패");
+            log.error("Upload exception", e);
+            throw new ImageUploadException("이미지 업로드 실패", e);
         }
     }
 
     private String getExtension(File file) {
-        String name = file.getName();
-        return name.substring(name.lastIndexOf('.'));
+        return file.getName().substring(file.getName().lastIndexOf('.'));
     }
 
     private String getExtensionFromUrl(String url) {
@@ -103,14 +125,14 @@ public class ImageService {
         if (idx > 0) {
             String ext = url.substring(idx);
             int q = ext.indexOf('?');
-            return q > 0 ? ext.substring(0, q) : ext;
+            return q>0?ext.substring(0,q):ext;
         }
         return ".png";
     }
 
     private String detectContentType(String key) {
         if (key.endsWith(".png")) return "image/png";
-        if (key.endsWith(".jpg") || key.endsWith(".jpeg")) return "image/jpeg";
+        if (key.endsWith(".jpg")||key.endsWith(".jpeg")) return "image/jpeg";
         if (key.endsWith(".webp")) return "image/webp";
         return "application/octet-stream";
     }
