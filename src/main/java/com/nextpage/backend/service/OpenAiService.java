@@ -48,7 +48,7 @@ public class OpenAiService {
         String dalleUrl = extractImageUrl(responseMap);
 
         try {
-            return imageService.uploadImageToS3UsingLambda(dalleUrl);
+            return imageService.uploadWithLambda(dalleUrl);
         } catch (ImageDownloadException | ImageUploadException e) {
             log.error("이미지 처리 오류: {}", e.getMessage(), e);
             throw new RuntimeException("이미지 처리 중 오류가 발생했습니다.", e);
@@ -81,7 +81,7 @@ public class OpenAiService {
         req.put("prompt", prompt);
         req.put("n", 1);
         req.put("size", "1024x1024");
-        req.put("model", "dall-e-3");
+        req.put("model", "dall-e-2");
         return req;
     }
 
