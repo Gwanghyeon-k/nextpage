@@ -61,7 +61,7 @@ public class StoryService {
         String userNickname = getUserNickname(httpServletRequest);
         String s3Url;
         try {
-            s3Url = imageService.uploadImageToS3UsingLambda(request.getImageUrl());
+            s3Url = imageService.uploadWithLambda(request.getImageUrl());
         } catch (ImageDownloadException | ImageUploadException e) {
             log.error("이미지 처리 중 오류: {}", e.getMessage(), e);
             throw new RuntimeException("이미지 처리 중 오류가 발생했습니다.", e);

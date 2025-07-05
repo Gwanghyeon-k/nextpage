@@ -107,8 +107,7 @@ public class ImageService {
             ObjectMetadata meta = new ObjectMetadata();
             meta.setContentLength(file.length());
             meta.setContentType(detectContentType(key));
-            PutObjectRequest req = new PutObjectRequest(bucket, key, fis, meta)
-                    .withCannedAcl(CannedAccessControlList.PublicRead);
+            PutObjectRequest req = new PutObjectRequest(bucket, key, file);
             amazonS3.putObject(req);
         } catch (Exception e) {
             log.error("Upload exception", e);
